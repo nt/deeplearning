@@ -3,22 +3,48 @@ import theano
 import theano.tensor as T
 from mnist import *
 import time, os
+from logreg import LogisticRegression
 
-class LogisticRegression(object):
-  def __init__(self, input, n_in, n_out):
-    self.b = theano.shared(numpy.zeros((n_out,)), name='b')
-    self.W = theano.shared(numpy.zeros((n_in,n_out)), name='W')
-    self.p_y_given_x = T.nnet.softmax(T.dot(input, self.W)+self.b)
-    self.y_pred = T.argmax(self.p_y_given_x, axis=1)
+class HiddenLayer(object):
+  def __init__(self, rng, input, n_in, n_out, activation=T.tanh):
+    self.input = input
+    W_values = numpy.asarray(
+      rng.uniform(
+        low = -numpy.sqrt(6./(n_in+n_out)),
+        high = numpy.sqrt(6./(n_in+n_out)),
+        size = (n_in, n_out)),
+      dtype=theano.config.floatX)
+    if activation == theano.tensor.nnet.sigmoid:
+      W_values *= 4
+    self.W = theano.shared(value=W_values, name='W')
+    b_values = numpy.zeros((n_out,), dtype=theano.config.floatX)
+    self.b = theano.shared(value=b_values, name='b')
+    self.output = activation(T.dot(self.input, self.W)+self.b)
     self.params = [self.W, self.b]
-  def negative_log_likelihood(self, y):
-    return - T.mean(T.log(self.p_y_given_x)[T.arange(y.shape[0]), y])
 
-  def errors(self, y):
-    return T.mean(T.neq(self.y_pred, y))
+class MLP(object):
+  def __init__(self, rng, input, n_in, n_hidden, n_out):
+    self.hiddenLayer = HiddenLayer(rng, input, n_in, n_hidden, activation = T.tanh)
+    self.logRegressionLayer = LogisticRegression(
+      input = self.hiddenLayer.output,
+      n_in = n_hidden,
+      n_out = n_out)
 
-def sgd_optimization_mnist(learning_rate=0.13, n_epochs=1000,
-                           batch_size=600):
+    self.L1 = abs(self.hiddenLayer.W).sum() + abs(self.logRegressionLayer.W).sum()
+    self.L2_sqr = (self.hiddenLayer.W**2).sum() + (self.logRegressionLayer.W**2).sum()
+
+    self.negative_log_likelihood = self.logRegressionLayer.negative_log_likelihood
+    self.errors = self.logRegressionLayer.negative_log_likelihood
+
+    self.params = self.hiddenLayer.params + self.logRegressionLayer.params
+
+def sgd_optimization_mnist(
+  learning_rate=0.13,
+  n_epochs=1000,
+  batch_size=20,
+  L1_reg=0.00,
+  L2_reg=0.0001,
+  n_hidden=500):
   
   # compute number of minibatches for training, validation and testing
   n_train_batches = train_set_x.get_value(borrow=True).shape[0] / batch_size
@@ -31,12 +57,16 @@ def sgd_optimization_mnist(learning_rate=0.13, n_epochs=1000,
   x = T.matrix('x')
   y = T.ivector('y')
 
-  classifier = LogisticRegression(
+  rng = numpy.random.RandomState(1234)
+
+  classifier = MLP(
+            rng = rng,
             input=x.reshape((batch_size, 28 * 28)), 
-            n_in=28 * 28, 
+            n_in=28 * 28,
+            n_hidden = n_hidden,
             n_out=10)
 
-  cost = classifier.negative_log_likelihood(y)
+  cost = classifier.negative_log_likelihood(y) + L1_reg*classifier.L1 + L2_reg*classifier.L2_sqr
 
   test_model = theano.function(
     inputs = [index],
@@ -57,12 +87,7 @@ def sgd_optimization_mnist(learning_rate=0.13, n_epochs=1000,
   )
 
   # Train
-
-  g_W = T.grad(cost, classifier.W)
-  g_b = T.grad(cost, classifier.b)
-
-  updates = [(classifier.W, classifier.W - learning_rate*g_W),
-            (classifier.b, classifier.b - learning_rate*g_b)]
+  updates = [(p, p-learning_rate*T.grad(cost, p)) for p in classifier.params]
 
   train_model = theano.function(
     inputs = [index],
@@ -110,7 +135,7 @@ def sgd_optimization_mnist(learning_rate=0.13, n_epochs=1000,
           best_validation_loss = this_validation_loss
           test_losses = [test_model(i) for i in xrange(n_test_batches)]
           test_score = numpy.mean(test_losses)
-          states.append((iter, best_validation_loss, test_score, classifier.W.get_value(), classifier.b.get_value()))
+          states.append([iter, best_validation_loss, test_score] + [v.get_value() for v in classifier.params])
           print(('     epoch %i, minibatch %i/%i, test error of best'
                        ' model %f %%') %
                         (epoch, minibatch_index + 1, n_train_batches,
@@ -130,7 +155,7 @@ def sgd_optimization_mnist(learning_rate=0.13, n_epochs=1000,
     ' ran for %.1fs' % ((end_time - start_time)))
 
   print "Wrote states to target/logreg_states.pkl.gz"
-  f = gzip.open('target/logreg_states.pkl.gz', 'w')
+  f = gzip.open('target/mlp_states.pkl.gz', 'w')
   cPickle.dump(states, f)
   f.close()
 
