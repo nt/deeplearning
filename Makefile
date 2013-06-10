@@ -16,4 +16,7 @@ target/logreg_001.png: target/logreg_states.pkl.gz
 target/logreg.gif: target/logreg_001.png
 	convert -delay 15 -loop 1 target/logreg_*.png target/logreg.gif
 
+target/autoencoder_states.pkl.gz: target/mnist.pkl.gz
+  python autoencoder.py
+
 all: target/logreg.gif
